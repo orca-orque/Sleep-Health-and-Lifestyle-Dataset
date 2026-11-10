@@ -8,7 +8,7 @@ APP_TITLE = "수면 장애 유무 예측"
 APP_ICON = "😴"
 DATA_URL = (
     "https://raw.githubusercontent.com/orca-orque/"
-    "https://raw.githubusercontent.com/orca-orque/Sleep-Health-and-Lifestyle-Dataset_data/refs/heads/main/sleep_preprocessed.csv
+    "Sleep-Health-and-Lifestyle-Dataset_data/refs/heads/main/sleep_preprocessed.csv"
 )
 
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
