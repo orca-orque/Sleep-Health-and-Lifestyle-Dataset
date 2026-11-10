@@ -8,7 +8,7 @@ APP_TITLE = "수면 장애 유무 예측"
 APP_ICON = "😴"
 DATA_URL = (
     "https://raw.githubusercontent.com/orca-orque/"
-    "Sleep-Health-and-Lifestyle-Dataset_data/refs/heads/main/sleep_preprocessed.csv"
+    "https://raw.githubusercontent.com/orca-orque/Sleep-Health-and-Lifestyle-Dataset_data/refs/heads/main/sleep_preprocessed.csv
 )
 
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
@@ -16,7 +16,7 @@ st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
 # 열 이름 -> 우리말 뜻
 COLUMN_MEANING = {
     "Person ID": "사람 번호 (한 사람마다 다른 고유 번호)",
-    "Gender": "성별",
+    "Gender": "성별 (0=남, 1=여)",
     "Age": "나이 (세)",
     "Sleep Duration": "하루 평균 수면 시간 (시간)",
     "Physical Activity Level": "하루 신체 활동 시간 (분)",
@@ -26,7 +26,7 @@ COLUMN_MEANING = {
 
 # 값 -> 화면에 보여 줄 이름
 VALUE_LABELS = {
-    "Gender": {"Male": "Male(남)", "Female": "Female(여)"},
+    "Gender": {"Male": "Male(남)", "Female": "Female(여)", 0: "0(남)", 1: "1(여)"},
     "Sleep Disorder": {0: "0(없음)", 1: "1(있음)"},
 }
 
