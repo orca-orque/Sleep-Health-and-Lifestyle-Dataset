@@ -18,7 +18,7 @@ DATA_URL = (
 # 살펴볼 세 가지 값: 열 이름 -> 화면에 보여 줄 이름
 FEATURES = {
     "Sleep Duration": "수면 시간 (시간)",
-    "Stress Level": "스트레스 수준 (점)",
+    "Stress Level": "스트레스 수준 (점수)",
     "Physical Activity Level": "신체 활동량 (분)",
 }
 REQUIRED_COLUMNS = ["Gender", "Age", "Sleep Disorder", *FEATURES]
