@@ -134,12 +134,6 @@ def predict_all(models: dict, x: pd.DataFrame) -> dict:
 
 
 def evaluate(df, train, test, features, mode):
-    """채점할 사람들과, 그 사람들에 대한 두 모델의 예측을 돌려줘요.
-
-    - 테스트용: 훈련용으로 학습한 모델이 테스트용 사람들을 채점해요.
-    - 교차검증: 전체를 N_SPLITS덩어리로 나눠 한 덩어리씩 번갈아 채점해서,
-      모든 사람이 자기를 한 번도 보지 않은 모델에게 한 번씩 채점받아요.
-    """
     if mode == MODE_TEST:
         people = test.reset_index(drop=True)
         models = fit_models(train, features)
@@ -161,19 +155,17 @@ def evaluate(df, train, test, features, mode):
 
 
 def confusion_counts(y_true, y_pred) -> dict:
-    """수면 장애(1)를 양성으로 두고 네 칸의 사람 수를 세요."""
-    matrix = confusion_matrix(y_true, y_pred, labels=[0, 1])  # 행=실제, 열=예측
+    matrix = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = (int(v) for v in matrix.ravel())
     return {"TP": tp, "FP": fp, "FN": fn, "TN": tn}
 
 
 def metric_values(c: dict) -> dict:
-    """네 칸에서 정확도, 재현율, 정밀도, F1을 구해요. 나눌 수 없으면 None."""
     tp, fp, fn, tn = c["TP"], c["FP"], c["FN"], c["TN"]
     total = tp + fp + fn + tn
     accuracy = (tp + tn) / total if total else None
-    recall = tp / (tp + fn) if (tp + fn) else None  # 분모: 실제 수면 장애인 사람 수
-    precision = tp / (tp + fp) if (tp + fp) else None  # 분모: 수면 장애라 예측한 사람 수
+    recall = tp / (tp + fn) if (tp + fn) else None
+    precision = tp / (tp + fp) if (tp + fp) else None
     f1 = None
     if precision is not None and recall is not None and (precision + recall) > 0:
         f1 = 2 * precision * recall / (precision + recall)
@@ -205,7 +197,6 @@ def summary_table(people: pd.DataFrame, predictions: dict) -> pd.DataFrame:
 
 
 def label_outcomes(people: pd.DataFrame, pred: np.ndarray) -> pd.DataFrame:
-    """사람마다 '찾아낸 환자 / 놓친 환자 / 아니라고 맞힌 사람 / 헛짚은 사람' 중 하나를 붙여요."""
     actual = people[TARGET].astype(int).to_numpy()
     outcome = np.select(
         [(actual == 1) & (pred == 1), (actual == 1) & (pred == 0), (actual == 0) & (pred == 1)],
@@ -221,7 +212,6 @@ def label_outcomes(people: pd.DataFrame, pred: np.ndarray) -> pd.DataFrame:
 # 목록과 표
 # ------------------------------------------------------------------
 def person_list(scored: pd.DataFrame, outcome: str):
-    """(전체 인원수, 나이가 많은 순서로 정렬한 앞 20줄)"""
     sub = scored[scored["결과"] == outcome].sort_values(["Age", "Person ID"], ascending=[False, True])
     table = pd.DataFrame(
         {
@@ -244,7 +234,6 @@ def list_title(label: str, count: int) -> str:
 
 
 def profile_table(scored: pd.DataFrame) -> pd.DataFrame:
-    """네 집단의 평균을 나란히 놓아요."""
     rows = []
     for outcome in OUTCOME_ORDER:
         sub = scored[scored["결과"] == outcome]
@@ -276,7 +265,7 @@ def profile_table(scored: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------
-# 그림
+# 그림 및 0.5 경계선 추가 함수
 # ------------------------------------------------------------------
 def axis_range(df: pd.DataFrame, feature: str) -> tuple:
     if feature == "Gender":
@@ -287,7 +276,6 @@ def axis_range(df: pd.DataFrame, feature: str) -> tuple:
 
 
 def axis_layout(df: pd.DataFrame, feature: str) -> dict:
-    """축 이름은 우리말로, 성별 축은 0/1 대신 남성/여성으로 보여 줘요."""
     layout = {"title": {"text": FEATURES[feature]}, "range": list(axis_range(df, feature))}
     if feature == "Gender":
         layout.update(tickvals=[0, 1], ticktext=["남성", "여성"])
@@ -298,7 +286,6 @@ GROUP_OPTIONS = ["나이대", "성별", "스트레스 수준", "하루 평균 �
 
 
 def group_column(scored: pd.DataFrame, option: str):
-    """사람들을 고른 기준으로 묶어요. (묶음 이름 목록, 묶음 순서)"""
     if option == "나이대":
         order = ["20대", "30대", "40대", "50대"]
         groups = pd.cut(scored["Age"], bins=[20, 30, 40, 50, 60], labels=order, right=False)
@@ -321,7 +308,6 @@ def group_column(scored: pd.DataFrame, option: str):
 
 
 def make_group_figure(scored: pd.DataFrame, option: str):
-    """묶음마다 맞힌 사람, 놓친 환자, 헛짚은 사람이 몇 %인지 쌓아서 보여 줘요."""
     groups, order = group_column(scored, option)
     outcome = scored["결과"].to_numpy()
     labels, rights, misses, wrongs = [], [], [], []
@@ -362,9 +348,11 @@ def make_group_figure(scored: pd.DataFrame, option: str):
     return fig
 
 
-def make_wrong_scatter(df, scored, x_feat, y_feat):
-    """모든 사람을 점으로 찍고, 틀린 사람을 색으로 눈에 띄게 해요."""
+def make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train_df):
+    """모든 사람을 점으로 찍고, '원래 모델(기본 속성)'과 '현재 모델(선택 속성)'의 0.5 경계선을 함께 그려요."""
     fig = go.Figure()
+
+    # 1. 점들 그리기 (맞힌 사람, 놓친 환자, 헛짚은 사람)
     for outcomes, label, color, size, opacity in (
         ([OUT_TP, OUT_TN], "맞힌 사람", RIGHT_COLOR, 7, 0.5),
         ([OUT_FN], OUT_FN, MISS_COLOR, 11, 0.85),
@@ -385,6 +373,58 @@ def make_wrong_scatter(df, scored, x_feat, y_feat):
                 ),
             )
         )
+
+    # 2. 2차원 격자(Grid) 생성
+    x_min, x_max = axis_range(df, x_feat)
+    y_min, y_max = axis_range(df, y_feat)
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 150), np.linspace(y_min, y_max, 150))
+
+    # 경계선을 그려주는 내부 함수
+    def add_boundary(feat_list, line_color, line_name, dash_style):
+        if x_feat not in feat_list or y_feat not in feat_list:
+            return  # 선택한 가로/세로 축이 해당 모델의 입력 속성에 포함되지 않으면 건너뜁니다.
+        
+        # 모델 학습
+        models = fit_models(train_df, feat_list)
+        scaler = models["scaler"]
+        logit = models["logit"]
+
+        # 그리드 데이터 생성 (다른 특성들은 평균값으로 고정)
+        grid_data = pd.DataFrame(index=np.arange(xx.ravel().shape[0]))
+        for f in feat_list:
+            if f == x_feat:
+                grid_data[f] = xx.ravel()
+            elif f == y_feat:
+                grid_data[f] = yy.ravel()
+            else:
+                grid_data[f] = df[f].mean()
+
+        try:
+            probs = logit.predict_proba(scaler.transform(grid_data[feat_list]))[:, 1]
+            zz = probs.reshape(xx.shape)
+
+            fig.add_trace(
+                go.Contour(
+                    z=zz,
+                    x=np.linspace(x_min, x_max, 150),
+                    y=np.linspace(y_min, y_max, 150),
+                    contours=dict(start=0.5, end=0.5, size=0, coloring="none"),
+                    line=dict(color=line_color, width=3, dash=dash_style),
+                    name=line_name,
+                    showscale=False,
+                )
+            )
+        except Exception:
+            pass
+
+    # 3. 원래 모델(기본 속성)과 현재 모델(선택 속성)의 0.5 경계선 추가
+    # 파란색 점선: 원래 0.5 경계선 (기본 속성 기준)
+    add_boundary(DEFAULT_FEATURES, "#1f77b4", "원래 0.5 경계선 (기본속성)", "dash")
+    
+    # 초록색/주황색 실선: 성능 높인 0.5 경계선 (사용자가 선택한 속성 기준)
+    if set(features) != set(DEFAULT_FEATURES):
+        add_boundary(features, "#2ca02c", "성능 높인 0.5 경계선 (선택속성)", "solid")
+
     fig.update_xaxes(zeroline=False, **axis_layout(df, x_feat))
     fig.update_yaxes(zeroline=False, **axis_layout(df, y_feat))
     fig.update_layout(height=520, legend=dict(orientation="h", y=-0.2), margin=dict(t=20))
@@ -420,7 +460,7 @@ def main() -> None:
         st.error("데이터에 빈 값이나 알 수 없는 값이 있어요. 성별은 Male/Female 또는 0/1이어야 해요.")
         st.stop()
 
-    # 1) 입력 속성 고르기 ('분류 모델' 페이지와 같은 자리)
+    # 1) 입력 속성 고르기
     st.subheader("1. 입력으로 쓸 속성 고르기")
     chosen = st.multiselect(
         "모델에게 보여 줄 속성 (두 개 이상)",
@@ -428,7 +468,7 @@ def main() -> None:
         default=DEFAULT_FEATURES,
         format_func=FEATURES.get,
     )
-    features = [f for f in FEATURES if f in chosen]  # 항상 같은 순서로 맞춰요.
+    features = [f for f in FEATURES if f in chosen]
     if len(features) < 2:
         st.info("속성을 두 개 이상 골라 주세요. 그래야 모델을 만들고 틀린 사람을 찾을 수 있어요.")
         st.stop()
@@ -454,8 +494,7 @@ def main() -> None:
         st.caption(
             f"전체 {len(df)}명을 {N_SPLITS}덩어리로 섞어 나눠(수면 장애 비율이 비슷해지게, 난수 고정) "
             "한 덩어리씩 번갈아 채점해요. 모든 사람이 자기를 한 번도 보지 않은 모델에게 한 번씩 채점받고, "
-            "크기 맞추기도 덩어리마다 학습용 사람들로만 계산해요. "
-            "테스트용보다 틀린 사람을 더 많이 볼 수 있어요."
+            "크기 맞추기도 덩어리마다 학습용 사람들로만 계산해요."
         )
     people, predictions = evaluate(df, train, test, features, mode)
     st.dataframe(summary_table(people, predictions), hide_index=True)
@@ -485,17 +524,6 @@ def main() -> None:
     else:
         right.caption("해당하는 사람이 없어요.")
 
-    if missed_count == counts["FN"] and wrong_count == counts["FP"]:
-        st.markdown(
-            f"왼쪽 목록의 전체 인원 {missed_count}명은 혼동행렬의 FN 칸({counts['FN']}명)과, "
-            f"오른쪽 목록의 전체 인원 {wrong_count}명은 FP 칸({counts['FP']}명)과 같아요."
-        )
-    else:
-        st.warning(
-            f"목록의 인원(왼쪽 {missed_count}명, 오른쪽 {wrong_count}명)이 "
-            f"혼동행렬의 FN({counts['FN']}명), FP({counts['FP']}명)와 달라요."
-        )
-
     # 4) 틀린 사람들은 어떤 사람들일까요?
     st.subheader("4. 틀린 사람들은 어떤 사람들일까요?")
 
@@ -515,7 +543,7 @@ def main() -> None:
     st.plotly_chart(make_group_figure(scored, option))
     st.caption("막대 하나는 한 집단 사람들을 100%로 보았을 때의 비율이에요. n은 그 집단의 사람 수예요.")
 
-    st.markdown("**틀린 사람들은 그림 어디에 있을까요?**")
+    st.markdown("**틀린 사람들은 그림 어디에 있을까요? (0.5 경계선 비교)**")
     all_features = list(FEATURES)
     c1, c2 = st.columns(2)
     x_feat = c1.selectbox(
@@ -534,10 +562,12 @@ def main() -> None:
         format_func=FEATURES.get,
         key="y_axis",
     )
-    st.plotly_chart(make_wrong_scatter(df, scored, x_feat, y_feat))
+    
+    # 0.5 경계선이 포함된 산점도 출력 함수 호출
+    st.plotly_chart(make_wrong_scatter_other := make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train))
     st.caption(
-        "같은 값을 가진 사람은 점이 겹쳐서 하나처럼 보일 수 있어요. "
-        "빨간 점은 놓친 환자, 보라색 점은 헛짚은 사람, 회색 점은 맞힌 사람이에요."
+        "파란색 점선은 '원래 0.5 경계선(기본 속성)'이며, 초록색 실선은 '성능을 높인 0.5 경계선(선택한 속성)'입니다. "
+        "속성이 같으면 하나의 경계선만 표시됩니다."
     )
 
 
