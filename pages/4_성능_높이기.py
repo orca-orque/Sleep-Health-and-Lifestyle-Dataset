@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils.class_weight import compute_class_weight
@@ -41,6 +42,9 @@ NAME_TREE = "의사결정트리(질문으로 답하는 모델)"
 GROUP_SIZE = 10
 TEST_PER_GROUP = 3
 RANDOM_STATE = 42
+
+TREE_DEPTH = 5  # 의사결정트리가 던지는 질문 횟수의 최대치
+N_SPLITS = 5  # 교차검증에서 사람들을 나누는 덩어리 수
 
 UNDEFINED = "계산할 수 없음"
 LABEL_BEFORE = "가중치 맞추기 전"
@@ -109,9 +113,9 @@ def fit_models(train: pd.DataFrame, features: list, balanced: bool) -> dict:
     )
     logit.fit(scaler.transform(x_train), y_train)
 
-    # 질문은 세 번까지만, 사람이 5명 미만인 마디는 더 나누지 않아요.
+    # 질문은 다섯 번까지만, 사람이 5명 미만인 마디는 더 나누지 않아요.
     tree = DecisionTreeClassifier(
-        max_depth=3,
+        max_depth=TREE_DEPTH,
         min_samples_split=5,
         class_weight=class_weight,
         random_state=RANDOM_STATE,
@@ -174,6 +178,79 @@ def change_line(before: dict, after: dict) -> str:
         f"찾아낸 환자 {before['TP']}명 → {after['TP']}명 · "
         f"놓친 환자 {before['FN']}명 → {after['FN']}명 · "
         f"헛짚은 사람 {before['FP']}명 → {after['FP']}명"
+    )
+
+
+# ------------------------------------------------------------------
+# 교차검증
+# ------------------------------------------------------------------
+def cross_validate(df: pd.DataFrame, features: list, balanced: bool) -> dict:
+    """전체 사람을 N_SPLITS덩어리로 나눠, 한 덩어리씩 번갈아 가며 채점해요.
+
+    덩어리마다 나머지 사람들로만 학습하고 크기 맞추기도 따로 계산해서,
+    채점받는 사람은 한 번도 보지 않은 모델에게 채점받아요.
+    돌려주는 값: {모델 이름: [덩어리마다의 네 칸 사람 수, ...]}
+    """
+    y = df[TARGET].astype(int).to_numpy()
+    splitter = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    folds = {NAME_LOGIT: [], NAME_TREE: []}
+    for fit_idx, eval_idx in splitter.split(df[features], y):
+        models = fit_models(df.iloc[fit_idx], features, balanced)
+        predictions = predict_all(models, df.iloc[eval_idx][features])
+        for name, pred in predictions.items():
+            folds[name].append(confusion_counts(y[eval_idx], pred))
+    return folds
+
+
+def pooled_counts(fold_counts: list) -> dict:
+    """모든 덩어리의 네 칸을 합쳐요. (사람마다 한 번씩 채점받은 결과)"""
+    return {key: sum(c[key] for c in fold_counts) for key in ("TP", "FP", "FN", "TN")}
+
+
+def accuracy_of(c: dict) -> float:
+    return (c["TP"] + c["TN"]) / (c["TP"] + c["FP"] + c["FN"] + c["TN"])
+
+
+def make_cv_figure(folds_before: list, folds_after: list):
+    """덩어리마다의 정확도를 가중치 전·후로 나란히 보여 줘요."""
+    labels = [f"{i}번째 덩어리" for i in range(1, N_SPLITS + 1)]
+    fig = go.Figure()
+    for key, label, folds in (
+        ("before", LABEL_BEFORE, folds_before),
+        ("after", LABEL_AFTER, folds_after),
+    ):
+        accuracies = [accuracy_of(c) * 100 for c in folds]
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=accuracies,
+                name=label,
+                marker_color=BOUNDARY_COLORS[key],
+                text=[f"{a:.1f}%" for a in accuracies],
+                textposition="outside",
+            )
+        )
+    fig.update_layout(
+        barmode="group",
+        height=360,
+        margin=dict(t=20),
+        legend=dict(orientation="h", y=-0.25),
+    )
+    fig.update_yaxes(title="정확도 (%)", range=[0, 112])
+    return fig
+
+
+def cv_summary_line(folds_before, folds_after, test_before, test_after) -> str:
+    def spread(folds):
+        accuracies = [accuracy_of(c) * 100 for c in folds]
+        return f"{min(accuracies):.1f}~{max(accuracies):.1f}%"
+
+    cv_before = accuracy_of(pooled_counts(folds_before)) * 100
+    cv_after = accuracy_of(pooled_counts(folds_after)) * 100
+    return (
+        f"교차검증 정확도 {cv_before:.1f}% → {cv_after:.1f}% "
+        f"(덩어리마다 {spread(folds_before)} → {spread(folds_after)}) · "
+        f"테스트용 정확도 {test_before * 100:.1f}% → {test_after * 100:.1f}%"
     )
 
 
@@ -546,25 +623,51 @@ def main() -> None:
         f"훈련용 {len(train)}명 중 수면 장애가 있는 사람은 {n_pos}명, 없는 사람은 {n_neg}명이에요. "
         f"가중치를 맞추면 학습할 때 수면 장애가 있는 사람 한 명을 {w_pos:.2f}명처럼, "
         f"없는 사람 한 명을 {w_neg:.2f}명처럼 세어서 양쪽의 합이 같아져요. "
-        f"채점은 테스트용 {len(test)}명을 그대로 한 명씩 세어요."
+        f"채점은 테스트용 {len(test)}명을 그대로 한 명씩 세어요. "
+        f"의사결정트리는 질문을 {TREE_DEPTH}번까지 던지고, 사람이 5명 미만인 마디는 더 나누지 않아요."
     )
 
     # 2) 전·후 비교 표
-    st.subheader("2. 가중치를 맞추기 전과 맞춘 뒤")
+    st.subheader("2. 가중치를 맞추기 전과 맞춘 뒤 (테스트 데이터)")
     left, right = st.columns(2)
+    test_accuracy = {}
     for column, name in zip((left, right), (NAME_LOGIT, NAME_TREE)):
         c_before = confusion_counts(y_test, pred_before[name])
         c_after = confusion_counts(y_test, pred_after[name])
+        test_accuracy[name] = (accuracy_of(c_before), accuracy_of(c_after))
         column.markdown(f"**{name}**")
         column.dataframe(before_after_table(c_before, c_after), hide_index=True)
         column.markdown(change_line(c_before, c_after))
 
-    # 3) 2차원 산점도
-    st.subheader("3. 0.5 경계선은 어떻게 움직였을까요? (2차원)")
+    # 3) 교차검증
+    st.subheader("3. 교차검증으로 다시 채점하기")
+    st.caption(
+        f"테스트용은 {len(test)}명뿐이라 몇 명만 달라져도 정확도가 크게 움직여요. "
+        f"그래서 전체 {len(df)}명을 {N_SPLITS}덩어리로 나눠, 한 덩어리씩 번갈아 가며 채점용으로 쓰고 "
+        f"나머지로 학습하는 일을 {N_SPLITS}번 해요. 모든 사람이 자기를 한 번도 보지 않은 모델에게 한 번씩 채점받고, "
+        "크기 맞추기도 덩어리마다 학습용 사람들로만 계산해요. "
+        "덩어리는 수면 장애 비율이 비슷해지게 섞어서 나눠요(난수 고정)."
+    )
+    cv_before = cross_validate(df, features, balanced=False)
+    cv_after = cross_validate(df, features, balanced=True)
+    left, right = st.columns(2)
+    for column, name in zip((left, right), (NAME_LOGIT, NAME_TREE)):
+        pooled_before = pooled_counts(cv_before[name])
+        pooled_after = pooled_counts(cv_after[name])
+        column.markdown(f"**{name}**")
+        column.dataframe(before_after_table(pooled_before, pooled_after), hide_index=True)
+        column.markdown(change_line(pooled_before, pooled_after))
+        column.markdown(
+            cv_summary_line(cv_before[name], cv_after[name], *test_accuracy[name])
+        )
+        column.plotly_chart(make_cv_figure(cv_before[name], cv_after[name]))
+
+    # 4) 2차원 산점도
+    st.subheader("4. 0.5 경계선은 어떻게 움직였을까요? (2차원)")
     show_scatter_2d(df, test, before, after, features)
 
-    # 4) 3차원 산점도
-    st.subheader("4. 0.5 평면은 어떻게 움직였을까요? (3차원)")
+    # 5) 3차원 산점도
+    st.subheader("5. 0.5 평면은 어떻게 움직였을까요? (3차원)")
     if len(features) >= 3:
         show_scatter_3d(df, test, before, after, features)
     else:
