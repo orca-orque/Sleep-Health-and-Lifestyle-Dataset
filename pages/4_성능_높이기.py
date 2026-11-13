@@ -35,6 +35,22 @@ DEFAULT_FEATURES = ["Sleep Duration", "Physical Activity Level", "Stress Level"]
 NAME_LOGIT = "로지스틱 회귀(확률로 답하는 모델)"
 NAME_TREE = "의사결정트리(질문으로 답하는 모델)"
 
+# 원래(기본 속성 기준) 모델 성능 지표 고정값
+BASELINE_METRICS = {
+    NAME_LOGIT: {
+        "정확도": "67.3%",
+        "재현율": "54.8%",
+        "정밀도": "56.1%",
+        "F1": "55.4%",
+    },
+    NAME_TREE: {
+        "정확도": "87.6%",
+        "재현율": "90.5%",
+        "정밀도": "79.2%",
+        "F1": "84.4%",
+    }
+}
+
 # '채점표' 페이지와 같은 나누기: 번호 순으로 10명씩 묶고, 묶음마다 앞쪽 3명을 테스트용으로 고정
 GROUP_SIZE = 10
 TEST_PER_GROUP = 3
@@ -65,14 +81,12 @@ MODE_CV = "cv"
 # ------------------------------------------------------------------
 @st.cache_data
 def load_data() -> pd.DataFrame:
-    # utf-8-sig: UTF-8 파일 맨 앞에 BOM이 있어도 없어도 첫 열 이름이 깨지지 않아요.
     df = pd.read_csv(DATA_URL, encoding="utf-8-sig")
     df.columns = [str(c).lstrip("\ufeff").strip() for c in df.columns]
     return df
 
 
 def gender_code(value) -> float:
-    """성별이 Male/Female 글자든 0/1 숫자든 0(남성)/1(여성)로 바꿔 줘요."""
     text = str(value).strip()
     if text in ("0", "Male"):
         return 0
@@ -88,10 +102,6 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def split_train_test(df: pd.DataFrame):
-    """번호 순으로 정렬해 10명씩 묶고, 묶음마다 앞쪽 3명을 테스트용으로 고정해요.
-
-    마지막 묶음이 10명보다 적으면 그 묶음의 30%를 올림한 만큼만 테스트용으로 둬요.
-    """
     ordered = df.sort_values("Person ID").reset_index(drop=True)
     order = pd.Series(np.arange(len(ordered)))
     group = order // GROUP_SIZE
@@ -111,12 +121,10 @@ def fit_models(train: pd.DataFrame, features: list) -> dict:
     x_train = train[features]
     y_train = train[TARGET].astype(int)
 
-    # 크기 맞추기(표준화)는 훈련용 사람들로만 계산해요.
     scaler = StandardScaler().fit(x_train)
     logit = LogisticRegression(max_iter=1000, random_state=RANDOM_STATE)
     logit.fit(scaler.transform(x_train), y_train)
 
-    # 질문은 다섯 번까지만, 사람이 5명 미만인 마디는 더 나누지 않아요.
     tree = DecisionTreeClassifier(
         max_depth=TREE_DEPTH, min_samples_split=5, random_state=RANDOM_STATE
     )
@@ -126,7 +134,6 @@ def fit_models(train: pd.DataFrame, features: list) -> dict:
 
 
 def predict_all(models: dict, x: pd.DataFrame) -> dict:
-    """(1 = 수면 장애라고 예측)"""
     return {
         NAME_LOGIT: models["logit"].predict(models["scaler"].transform(x)),
         NAME_TREE: models["tree"].predict(x),
@@ -191,6 +198,40 @@ def summary_table(people: pd.DataFrame, predictions: dict) -> pd.DataFrame:
                 "F1": percent(v["F1"]),
                 "놓친 환자 (FN)": f"{c['FN']}명",
                 "헛짚은 사람 (FP)": f"{c['FP']}명",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def comparison_table(people: pd.DataFrame, predictions: dict) -> pd.DataFrame:
+    """원래 모델 성능과 현재 모델 성능을 한눈에 비교하는 표 생성"""
+    y = people[TARGET].astype(int).to_numpy()
+    rows = []
+    for name, pred in predictions.items():
+        c = confusion_counts(y, pred)
+        v = metric_values(c)
+        
+        # 원래 모델 지표 가져오기
+        base = BASELINE_METRICS.get(name, {})
+        
+        rows.append(
+            {
+                "구분": "원래 모델 (기본 속성)",
+                "모델": name,
+                "정확도": base.get("정확도", "-"),
+                "재현율": base.get("재현율", "-"),
+                "정밀도": base.get("정밀도", "-"),
+                "F1": base.get("F1", "-"),
+            }
+        )
+        rows.append(
+            {
+                "구분": "현재 모델 (선택 속성)",
+                "모델": name,
+                "정확도": percent(v["정확도"]),
+                "재현율": percent(v["재현율"]),
+                "정밀도": percent(v["정밀도"]),
+                "F1": percent(v["F1"]),
             }
         )
     return pd.DataFrame(rows)
@@ -264,9 +305,6 @@ def profile_table(scored: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ------------------------------------------------------------------
-# 그림 및 0.5 경계선 추가 함수
-# ------------------------------------------------------------------
 def axis_range(df: pd.DataFrame, feature: str) -> tuple:
     if feature == "Gender":
         return (-0.3, 1.3)
@@ -349,10 +387,8 @@ def make_group_figure(scored: pd.DataFrame, option: str):
 
 
 def make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train_df):
-    """모든 사람을 점으로 찍고, '원래 모델(기본 속성)'과 '현재 모델(선택 속성)'의 0.5 경계선을 함께 그려요."""
     fig = go.Figure()
 
-    # 1. 점들 그리기 (맞힌 사람, 놓친 환자, 헛짚은 사람)
     for outcomes, label, color, size, opacity in (
         ([OUT_TP, OUT_TN], "맞힌 사람", RIGHT_COLOR, 7, 0.5),
         ([OUT_FN], OUT_FN, MISS_COLOR, 11, 0.85),
@@ -374,22 +410,18 @@ def make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train
             )
         )
 
-    # 2. 2차원 격자(Grid) 생성
     x_min, x_max = axis_range(df, x_feat)
     y_min, y_max = axis_range(df, y_feat)
     xx, yy = np.meshgrid(np.linspace(x_min, x_max, 150), np.linspace(y_min, y_max, 150))
 
-    # 경계선을 그려주는 내부 함수
     def add_boundary(feat_list, line_color, line_name, dash_style):
         if x_feat not in feat_list or y_feat not in feat_list:
-            return  # 선택한 가로/세로 축이 해당 모델의 입력 속성에 포함되지 않으면 건너뜁니다.
+            return
         
-        # 모델 학습
         models = fit_models(train_df, feat_list)
         scaler = models["scaler"]
         logit = models["logit"]
 
-        # 그리드 데이터 생성 (다른 특성들은 평균값으로 고정)
         grid_data = pd.DataFrame(index=np.arange(xx.ravel().shape[0]))
         for f in feat_list:
             if f == x_feat:
@@ -417,11 +449,8 @@ def make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train
         except Exception:
             pass
 
-    # 3. 원래 모델(기본 속성)과 현재 모델(선택 속성)의 0.5 경계선 추가
-    # 파란색 점선: 원래 0.5 경계선 (기본 속성 기준)
     add_boundary(DEFAULT_FEATURES, "#1f77b4", "원래 0.5 경계선 (기본속성)", "dash")
     
-    # 초록색/주황색 실선: 성능 높인 0.5 경계선 (사용자가 선택한 속성 기준)
     if set(features) != set(DEFAULT_FEATURES):
         add_boundary(features, "#2ca02c", "성능 높인 0.5 경계선 (선택속성)", "solid")
 
@@ -496,8 +525,17 @@ def main() -> None:
             "한 덩어리씩 번갈아 채점해요. 모든 사람이 자기를 한 번도 보지 않은 모델에게 한 번씩 채점받고, "
             "크기 맞추기도 덩어리마다 학습용 사람들로만 계산해요."
         )
+    
     people, predictions = evaluate(df, train, test, features, mode)
+    
+    # 기본 요약 표 출력
+    st.markdown("#### 📌 현재 설정 모델 성능 요약")
     st.dataframe(summary_table(people, predictions), hide_index=True)
+
+    # 원래 모델 vs 현재 모델 성능 비교 표 추가
+    st.markdown("#### 📊 원래 모델(기본 속성) vs 현재 모델(선택 속성) 비교")
+    st.caption("기존 원래 모델의 성능(로지스틱 회귀: 정확도 67.3% / 의사결정트리: 정확도 87.6%)과 현재 선택한 속성으로 학습한 모델 성능을 비교합니다.")
+    st.dataframe(comparison_table(people, predictions), hide_index=True)
 
     # 3) 틀린 사람 목록
     st.subheader("3. 틀린 사람들 목록")
@@ -563,8 +601,7 @@ def main() -> None:
         key="y_axis",
     )
     
-    # 0.5 경계선이 포함된 산점도 출력 함수 호출
-    st.plotly_chart(make_wrong_scatter_other := make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train))
+    st.plotly_chart(make_wrong_scatter_with_boundary(df, scored, x_feat, y_feat, features, train))
     st.caption(
         "파란색 점선은 '원래 0.5 경계선(기본 속성)'이며, 초록색 실선은 '성능을 높인 0.5 경계선(선택한 속성)'입니다. "
         "속성이 같으면 하나의 경계선만 표시됩니다."
