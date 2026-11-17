@@ -40,7 +40,15 @@ GROUP_SIZE = 10
 TEST_PER_GROUP = 3
 RANDOM_STATE = 42
 
-TREE_DEPTH = 5  # 의사결정트리가 던지는 질문 횟수의 최대치
+# 원래 = '채점표' 페이지의 설정, 지금 = 이 페이지에서 성능을 높인 설정
+ORIGINAL_FEATURES = DEFAULT_FEATURES  # 원래는 속성 세 개
+ORIGINAL_TREE_DEPTH = 3  # 원래는 질문 세 번
+TREE_DEPTH = 5  # 지금은 질문 다섯 번까지
+
+LABEL_ORIGINAL = "원래 (채점표 설정)"
+LABEL_NOW = "지금 (성능을 높인 뒤)"
+VERSION_COLORS = {LABEL_ORIGINAL: "#8C564B", LABEL_NOW: "#2CA02C"}  # 원래 = 갈색, 지금 = 초록
+
 N_SPLITS = 5  # 교차검증에서 사람들을 나누는 덩어리 수
 MAX_ROWS = 20  # 목록에 보여 줄 최대 줄 수
 UNDEFINED = "계산할 수 없음"
@@ -58,13 +66,6 @@ WRONG_COLOR = "#9467BD"  # 헛짚은 사람 = 보라
 
 MODE_TEST = "test"
 MODE_CV = "cv"
-
-# 0.5 경계선: 원래 모델과 성능을 높인 모델
-LINE_ORIGINAL = "원래 모델"
-LINE_IMPROVED = "성능을 높인 모델"
-LINE_COLORS = {LINE_ORIGINAL: "#8C564B", LINE_IMPROVED: "#2CA02C"}  # 원래 = 갈색, 높인 = 초록
-POINT_COLORS = {0: "#4C78A8", 1: "#F58518"}  # 실제 수면 장애 없음 = 파랑, 있음 = 주황
-ANSWER_NAME = {0: "수면 장애 없음", 1: "수면 장애 있음"}
 
 
 # ------------------------------------------------------------------
@@ -114,7 +115,7 @@ def split_train_test(df: pd.DataFrame):
 # ------------------------------------------------------------------
 # 모델 학습과 채점
 # ------------------------------------------------------------------
-def fit_models(train: pd.DataFrame, features: list) -> dict:
+def fit_models(train: pd.DataFrame, features: list, tree_depth: int) -> dict:
     x_train = train[features]
     y_train = train[TARGET].astype(int)
 
@@ -123,9 +124,9 @@ def fit_models(train: pd.DataFrame, features: list) -> dict:
     logit = LogisticRegression(max_iter=1000, random_state=RANDOM_STATE)
     logit.fit(scaler.transform(x_train), y_train)
 
-    # 질문은 다섯 번까지만, 사람이 5명 미만인 마디는 더 나누지 않아요.
+    # 질문은 tree_depth번까지만, 사람이 5명 미만인 마디는 더 나누지 않아요.
     tree = DecisionTreeClassifier(
-        max_depth=TREE_DEPTH, min_samples_split=5, random_state=RANDOM_STATE
+        max_depth=tree_depth, min_samples_split=5, random_state=RANDOM_STATE
     )
     tree.fit(x_train, y_train)
 
@@ -140,7 +141,7 @@ def predict_all(models: dict, x: pd.DataFrame) -> dict:
     }
 
 
-def evaluate(df, train, test, features, mode):
+def evaluate(df, train, test, features, tree_depth, mode):
     """채점할 사람들과, 그 사람들에 대한 두 모델의 예측을 돌려줘요.
 
     - 테스트용: 훈련용으로 학습한 모델이 테스트용 사람들을 채점해요.
@@ -149,7 +150,7 @@ def evaluate(df, train, test, features, mode):
     """
     if mode == MODE_TEST:
         people = test.reset_index(drop=True)
-        models = fit_models(train, features)
+        models = fit_models(train, features, tree_depth)
         return people, predict_all(models, people[features])
 
     people = df.reset_index(drop=True)
@@ -160,7 +161,7 @@ def evaluate(df, train, test, features, mode):
     }
     splitter = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     for fit_idx, eval_idx in splitter.split(people[features], y):
-        models = fit_models(people.iloc[fit_idx], features)
+        models = fit_models(people.iloc[fit_idx], features, tree_depth)
         fold_pred = predict_all(models, people.iloc[eval_idx][features])
         for name, pred in fold_pred.items():
             predictions[name][eval_idx] = pred
@@ -191,25 +192,49 @@ def percent(value) -> str:
     return UNDEFINED if value is None else f"{value * 100:.1f}%"
 
 
-def summary_table(people: pd.DataFrame, predictions: dict) -> pd.DataFrame:
-    """모델(또는 모델 설명) 이름마다 정확도, 재현율, 정밀도, F1과 틀린 사람 수를 한 줄로 보여 줘요."""
-    y = people[TARGET].astype(int).to_numpy()
+def compare_table(before: dict, after: dict, label_before: str, label_after: str) -> pd.DataFrame:
+    """원래와 지금의 네 지표, 틀린 사람 수를 나란히 놓고 바뀐 폭도 적어요."""
+    mb, ma = metric_values(before), metric_values(after)
     rows = []
-    for name, pred in predictions.items():
-        c = confusion_counts(y, pred)
-        v = metric_values(c)
+    for name in ("정확도", "재현율", "정밀도", "F1"):
+        vb, va = mb[name], ma[name]
+        diff = "-" if vb is None or va is None else f"{(va - vb) * 100:+.1f}%p"
+        rows.append([name, percent(vb), percent(va), diff])
+    for label, key in (("놓친 환자 (FN)", "FN"), ("헛짚은 사람 (FP)", "FP")):
         rows.append(
-            {
-                "모델": name,
-                "정확도": percent(v["정확도"]),
-                "재현율": percent(v["재현율"]),
-                "정밀도": percent(v["정밀도"]),
-                "F1": percent(v["F1"]),
-                "놓친 환자 (FN)": f"{c['FN']}명",
-                "헛짚은 사람 (FP)": f"{c['FP']}명",
-            }
+            [label, f"{before[key]}명", f"{after[key]}명", f"{after[key] - before[key]:+d}명"]
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["항목", label_before, label_after, "바뀐 폭"])
+
+
+def make_metric_figure(before: dict, after: dict, label_before: str, label_after: str):
+    """네 지표를 원래와 지금으로 나란히 막대로 보여 줘요."""
+    names = ["정확도", "재현율", "정밀도", "F1"]
+    fig = go.Figure()
+    for color, label, counts in (
+        (VERSION_COLORS[LABEL_ORIGINAL], label_before, before),
+        (VERSION_COLORS[LABEL_NOW], label_after, after),
+    ):
+        values = metric_values(counts)
+        heights = [None if values[n] is None else values[n] * 100 for n in names]
+        fig.add_trace(
+            go.Bar(
+                x=names,
+                y=heights,
+                name=label,
+                marker_color=color,
+                text=["" if h is None else f"{h:.1f}%" for h in heights],
+                textposition="outside",
+            )
+        )
+    fig.update_layout(
+        barmode="group",
+        height=340,
+        margin=dict(t=20),
+        legend=dict(orientation="h", y=-0.25),
+    )
+    fig.update_yaxes(title="%", range=[0, 112])
+    return fig
 
 
 def label_outcomes(people: pd.DataFrame, pred: np.ndarray) -> pd.DataFrame:
@@ -370,35 +395,6 @@ def make_group_figure(scored: pd.DataFrame, option: str):
     return fig
 
 
-def make_wrong_scatter(df, scored, x_feat, y_feat):
-    """모든 사람을 점으로 찍고, 틀린 사람을 색으로 눈에 띄게 해요."""
-    fig = go.Figure()
-    for outcomes, label, color, size, opacity in (
-        ([OUT_TP, OUT_TN], "맞힌 사람", RIGHT_COLOR, 7, 0.5),
-        ([OUT_FN], OUT_FN, MISS_COLOR, 11, 0.85),
-        ([OUT_FP], OUT_FP, WRONG_COLOR, 11, 0.85),
-    ):
-        sub = scored[scored["결과"].isin(outcomes)]
-        fig.add_trace(
-            go.Scatter(
-                x=sub[x_feat],
-                y=sub[y_feat],
-                mode="markers",
-                name=label,
-                marker=dict(
-                    color=color, size=size, opacity=opacity, line=dict(width=1, color="white")
-                ),
-                hovertemplate=(
-                    f"{FEATURES[x_feat]}: %{{x}}<br>{FEATURES[y_feat]}: %{{y}}<extra>{label}</extra>"
-                ),
-            )
-        )
-    fig.update_xaxes(zeroline=False, **axis_layout(df, x_feat))
-    fig.update_yaxes(zeroline=False, **axis_layout(df, y_feat))
-    fig.update_layout(height=520, legend=dict(orientation="h", y=-0.2), margin=dict(t=20))
-    return fig
-
-
 def score_terms(models: dict, model_features: list, axes: list, fixed: dict):
     """점수 = k + (축 값 × 계수의 합). 점수가 0보다 크면 수면 장애일 확률이 0.5보다 커요.
 
@@ -466,80 +462,39 @@ def format_fixed_value(feature: str, value: float) -> str:
     return f"{value:g}"
 
 
-def compare_table(before: dict, after: dict, label_before: str, label_after: str) -> pd.DataFrame:
-    """원래 모델과 성능을 높인 모델의 네 지표와 틀린 사람 수를 나란히 놓고, 바뀐 폭도 적어요."""
-    mb, ma = metric_values(before), metric_values(after)
-    rows = []
-    for name in ("정확도", "재현율", "정밀도", "F1"):
-        vb, va = mb[name], ma[name]
-        diff = "-" if vb is None or va is None else f"{(va - vb) * 100:+.1f}%p"
-        rows.append([name, percent(vb), percent(va), diff])
-    for label, key in (("놓친 환자 (FN)", "FN"), ("헛짚은 사람 (FP)", "FP")):
-        rows.append(
-            [label, f"{before[key]}명", f"{after[key]}명", f"{after[key] - before[key]:+d}명"]
-        )
-    return pd.DataFrame(rows, columns=["항목", label_before, label_after, "바뀐 폭"])
+def make_wrong_scatter(df, scored, x_feat, y_feat, line_specs):
+    """모든 사람을 점으로 찍고 틀린 사람을 색으로 눈에 띄게 한 뒤,
+    원래 모델과 지금 모델의 0.5 경계선을 서로 다른 색으로 겹쳐 그려요.
 
-
-def make_metric_figure(before: dict, after: dict):
-    """네 지표를 원래 모델과 성능을 높인 모델로 나란히 막대로 보여 줘요."""
-    names = ["정확도", "재현율", "정밀도", "F1"]
-    fig = go.Figure()
-    for label, counts in ((LINE_ORIGINAL, before), (LINE_IMPROVED, after)):
-        values = metric_values(counts)
-        heights = [None if values[n] is None else values[n] * 100 for n in names]
-        fig.add_trace(
-            go.Bar(
-                x=names,
-                y=heights,
-                name=label,
-                marker_color=LINE_COLORS[label],
-                text=["" if h is None else f"{h:.1f}%" for h in heights],
-                textposition="outside",
-            )
-        )
-    fig.update_layout(
-        barmode="group",
-        height=340,
-        margin=dict(t=20),
-        legend=dict(orientation="h", y=-0.25),
-    )
-    fig.update_yaxes(title="%", range=[0, 112])
-    return fig
-
-
-def make_boundary_figure(df, people, specs, x_feat, y_feat):
-    """사람들을 실제 수면 장애 여부로 색을 나눠 찍고, 모델마다 0.5 경계선을 겹쳐 그려요.
-
-    specs: [(이름, 모델 묶음, 그 모델이 쓴 속성 목록), ...]
+    line_specs: [(이름, 모델 묶음, 그 모델이 쓴 속성 목록), ...]
     """
-    fixed = {f: float(people[f].median()) for f in FEATURES}
+    fixed = {f: float(scored[f].median()) for f in FEATURES}
     x_range, y_range = axis_range(df, x_feat), axis_range(df, y_feat)
     fig = go.Figure()
 
-    for code in (0, 1):
-        sub = people[people[TARGET] == code]
+    for outcomes, label, color, size, opacity in (
+        ([OUT_TP, OUT_TN], "맞힌 사람", RIGHT_COLOR, 7, 0.5),
+        ([OUT_FN], OUT_FN, MISS_COLOR, 11, 0.85),
+        ([OUT_FP], OUT_FP, WRONG_COLOR, 11, 0.85),
+    ):
+        sub = scored[scored["결과"].isin(outcomes)]
         fig.add_trace(
             go.Scatter(
                 x=sub[x_feat],
                 y=sub[y_feat],
                 mode="markers",
-                name=f"실제 {ANSWER_NAME[code]}",
+                name=label,
                 marker=dict(
-                    color=POINT_COLORS[code],
-                    size=9,
-                    opacity=0.65,
-                    line=dict(width=1, color="white"),
+                    color=color, size=size, opacity=opacity, line=dict(width=1, color="white")
                 ),
                 hovertemplate=(
-                    f"{FEATURES[x_feat]}: %{{x}}<br>{FEATURES[y_feat]}: %{{y}}"
-                    f"<extra>실제 {ANSWER_NAME[code]}</extra>"
+                    f"{FEATURES[x_feat]}: %{{x}}<br>{FEATURES[y_feat]}: %{{y}}<extra>{label}</extra>"
                 ),
             )
         )
 
     sides, notes = {}, []
-    for label, models, model_features in specs:
+    for label, models, model_features in line_specs:
         unused = [
             (axis_name, feature)
             for axis_name, feature in (("가로축", x_feat), ("세로축", y_feat))
@@ -564,122 +519,25 @@ def make_boundary_figure(df, people, specs, x_feat, y_feat):
                     y=[p[1] for p in points],
                     mode="lines",
                     name=f"{label} 0.5 경계선",
-                    line=dict(color=LINE_COLORS[label], width=3),
+                    line=dict(color=VERSION_COLORS[label], width=3),
                     hoverinfo="skip",
                 )
             )
 
     fig.update_xaxes(zeroline=False, **axis_layout(df, x_feat))
     fig.update_yaxes(zeroline=False, **axis_layout(df, y_feat))
-    fig.update_layout(height=560, legend=dict(orientation="h", y=-0.2), margin=dict(t=20))
+    fig.update_layout(height=560, legend=dict(orientation="h", y=-0.25), margin=dict(t=20))
     return fig, fixed, sides, notes
 
 
 # ------------------------------------------------------------------
 # 화면
 # ------------------------------------------------------------------
-def show_boundaries(df, train, test, people, predictions, features, mode) -> None:
-    st.subheader("5. 원래 모델과 성능을 높인 모델 비교")
-    remaining = [f for f in FEATURES if f not in features]
-    if not remaining:
-        st.info(
-            "속성을 다섯 개 모두 골랐어요. 1번에서 속성을 줄이면, 줄인 모델(원래 모델)과 "
-            "다섯 개를 모두 쓴 모델(성능을 높인 모델)의 경계선을 비교할 수 있어요."
-        )
-        return
-    extras = st.multiselect(
-        "성능을 높이려고 더할 속성",
-        options=remaining,
-        default=remaining,
-        format_func=FEATURES.get,
-    )
-    if not extras:
-        st.info("더할 속성을 하나 이상 골라 주세요.")
-        return
-    improved = [f for f in FEATURES if f in features or f in extras]
-
-    # 두 모델 모두 훈련용 사람들로 학습해요.
-    models_original = fit_models(train, features)
-    models_improved = fit_models(train, improved)
-    _, predictions_improved = evaluate(df, train, test, improved, mode)
-
-    label_original = f"{LINE_ORIGINAL} (속성 {len(features)}개)"
-    label_improved = f"{LINE_IMPROVED} (속성 {len(improved)}개)"
-    st.caption(
-        f"{LINE_ORIGINAL}은 {', '.join(FEATURES[f] for f in features)}로, "
-        f"{LINE_IMPROVED}은 {', '.join(FEATURES[f] for f in improved)}로 학습한 모델이에요. "
-        f"아래는 두 모델을 같은 {len(people)}명에게 채점한 결과예요."
-    )
-
-    st.markdown("**정확도·재현율·정밀도·F1 비교**")
-    y_true = people[TARGET].astype(int).to_numpy()
-    left, right = st.columns(2)
-    for column, name in zip((left, right), (NAME_LOGIT, NAME_TREE)):
-        c_original = confusion_counts(y_true, predictions[name])
-        c_improved = confusion_counts(y_true, predictions_improved[name])
-        column.markdown(f"**{name}**")
-        column.dataframe(
-            compare_table(c_original, c_improved, label_original, label_improved),
-            hide_index=True,
-        )
-        column.plotly_chart(make_metric_figure(c_original, c_improved))
-
-    st.markdown(f"**0.5 경계선 비교 ({NAME_LOGIT})**")
-
-    all_features = list(FEATURES)
-    c1, c2 = st.columns(2)
-    x_default = "Age" if "Age" in all_features else all_features[0]
-    x_feat = c1.selectbox(
-        "가로축",
-        all_features,
-        index=all_features.index(x_default),
-        format_func=FEATURES.get,
-        key="x_line",
-    )
-    y_options = [f for f in all_features if f != x_feat]
-    y_default = "Sleep Duration" if "Sleep Duration" in y_options else y_options[0]
-    y_feat = c2.selectbox(
-        "세로축",
-        y_options,
-        index=y_options.index(y_default),
-        format_func=FEATURES.get,
-        key="y_line",
-    )
-
-    specs = [
-        (LINE_ORIGINAL, models_original, features),
-        (LINE_IMPROVED, models_improved, improved),
-    ]
-    fig, fixed, sides, notes = make_boundary_figure(df, people, specs, x_feat, y_feat)
-    st.plotly_chart(fig)
-    st.caption(
-        "점은 채점한 사람들이고 주황색은 실제로 수면 장애가 있는 사람이에요. "
-        "갈색 선은 원래 모델, 초록색 선은 성능을 높인 모델이 수면 장애(양성)일 확률을 0.5로 가르는 선이에요. "
-        "선의 한쪽은 확률이 0.5보다 높은 쪽이에요. "
-        f"두 선 모두 훈련용 {len(train)}명으로 학습한 모델의 선이에요."
-    )
-
-    others = [f for f in improved if f not in (x_feat, y_feat)]
-    if others:
-        values = ", ".join(f"{FEATURES[f]} {format_fixed_value(f, fixed[f])}" for f in others)
-        st.markdown(f"축이 아닌 속성은 그림에 찍힌 사람들의 중앙값에 세워 두고 계산했어요: **{values}**")
-    else:
-        st.markdown("두 모델이 쓴 속성을 모두 축으로 썼기 때문에 따로 세워 둔 값은 없어요.")
-    for note in notes:
-        st.caption(note)
-    for label in (LINE_ORIGINAL, LINE_IMPROVED):
-        if sides.get(label) is not None:
-            st.warning(
-                f"{label}의 0.5 경계선은 이 그림 밖에 있어요. "
-                f"그림 안에서는 어디서나 수면 장애일 확률이 0.5보다 {sides[label]}."
-            )
-
-
 def main() -> None:
     st.title("🚀 성능 높이기")
     st.caption(
-        "모델이 틀린 사람들이 어떤 사람들인지 살펴보면, 모델을 어떻게 고칠지 단서를 찾을 수 있어요. "
-        f"수면 장애(1)를 양성으로 두었고, 의사결정트리는 질문을 {TREE_DEPTH}번까지 던져요."
+        "'채점표' 페이지의 설정(원래)과, 성능을 높이려고 바꾼 설정(지금)의 결과를 비교하고, "
+        "모델이 틀린 사람들이 어떤 사람들인지 살펴봐요. 수면 장애(1)를 양성으로 두었어요."
     )
 
     try:
@@ -716,8 +574,8 @@ def main() -> None:
 
     train, test = split_train_test(df)
 
-    # 2) 채점할 사람들 고르기
-    st.subheader("2. 어떤 사람들을 채점할까요?")
+    # 2) 채점할 사람들 고르기, 원래와 지금 비교
+    st.subheader("2. 원래와 지금의 채점 결과 비교")
     mode = st.radio(
         "채점할 사람들",
         [MODE_TEST, MODE_CV],
@@ -738,17 +596,54 @@ def main() -> None:
             "크기 맞추기도 덩어리마다 학습용 사람들로만 계산해요. "
             "테스트용보다 틀린 사람을 더 많이 볼 수 있어요."
         )
-    people, predictions = evaluate(df, train, test, features, mode)
-    st.dataframe(summary_table(people, predictions), hide_index=True)
 
-    # 3) 틀린 사람 목록
+    # 지금(성능을 높인 설정)과 원래('채점표' 설정)를 같은 사람들에게 채점해요.
+    people, predictions = evaluate(df, train, test, features, TREE_DEPTH, mode)
+    _, predictions_original = evaluate(
+        df, train, test, ORIGINAL_FEATURES, ORIGINAL_TREE_DEPTH, mode
+    )
+
+    st.caption(
+        f"원래는 '채점표' 페이지의 설정(속성 {len(ORIGINAL_FEATURES)}개: "
+        f"{', '.join(FEATURES[f] for f in ORIGINAL_FEATURES)} · 의사결정트리 질문 {ORIGINAL_TREE_DEPTH}번)이고, "
+        f"지금은 이 페이지의 설정(속성 {len(features)}개 · 의사결정트리 질문 {TREE_DEPTH}번)이에요. "
+        f"두 설정 모두 같은 {len(people)}명을 채점했어요."
+    )
+
+    y_true = people[TARGET].astype(int).to_numpy()
+    left, right = st.columns(2)
+    for column, name, depth_note in (
+        (left, NAME_LOGIT, False),
+        (right, NAME_TREE, True),
+    ):
+        label_before = f"원래 (속성 {len(ORIGINAL_FEATURES)}개"
+        label_after = f"지금 (속성 {len(features)}개"
+        if depth_note:
+            label_before += f", 질문 {ORIGINAL_TREE_DEPTH}번"
+            label_after += f", 질문 {TREE_DEPTH}번"
+        label_before += ")"
+        label_after += ")"
+
+        c_original = confusion_counts(y_true, predictions_original[name])
+        c_now = confusion_counts(y_true, predictions[name])
+        column.markdown(f"**{name}**")
+        column.dataframe(
+            compare_table(c_original, c_now, label_before, label_after), hide_index=True
+        )
+        column.plotly_chart(make_metric_figure(c_original, c_now, label_before, label_after))
+        if name == NAME_LOGIT and features == ORIGINAL_FEATURES:
+            column.caption(
+                "로지스틱 회귀는 입력 속성이 같으면 결과도 같아요. 1번에서 속성을 더하면 달라져요."
+            )
+
+    # 3) 틀린 사람 목록 (지금 설정의 모델)
     st.subheader("3. 틀린 사람들 목록")
     model_name = st.radio("목록을 볼 모델", [NAME_LOGIT, NAME_TREE], horizontal=True)
     scored = label_outcomes(people, predictions[model_name])
-    counts = confusion_counts(people[TARGET].astype(int).to_numpy(), predictions[model_name])
+    counts = confusion_counts(y_true, predictions[model_name])
     n_wrong = counts["FN"] + counts["FP"]
     st.markdown(
-        f"{len(people)}명 중 틀린 사람은 **{n_wrong}명**({n_wrong / len(people) * 100:.1f}%)이에요. "
+        f"지금 설정의 모델이 {len(people)}명 중 틀린 사람은 **{n_wrong}명**({n_wrong / len(people) * 100:.1f}%)이에요. "
         f"놓친 환자 {counts['FN']}명, 헛짚은 사람 {counts['FP']}명이에요."
     )
 
@@ -796,7 +691,7 @@ def main() -> None:
     st.plotly_chart(make_group_figure(scored, option))
     st.caption("막대 하나는 한 집단 사람들을 100%로 보았을 때의 비율이에요. n은 그 집단의 사람 수예요.")
 
-    st.markdown("**틀린 사람들은 그림 어디에 있을까요?**")
+    st.markdown("**틀린 사람들은 그림 어디에 있을까요? (0.5 경계선 포함)**")
     all_features = list(FEATURES)
     c1, c2 = st.columns(2)
     x_feat = c1.selectbox(
@@ -815,14 +710,38 @@ def main() -> None:
         format_func=FEATURES.get,
         key="y_axis",
     )
-    st.plotly_chart(make_wrong_scatter(df, scored, x_feat, y_feat))
+
+    # 0.5 경계선은 로지스틱 회귀(확률로 답하는 모델)의 선이고, 훈련용 사람들로 학습한 모델에서 나와요.
+    line_specs = [
+        (LABEL_ORIGINAL, fit_models(train, ORIGINAL_FEATURES, ORIGINAL_TREE_DEPTH), ORIGINAL_FEATURES),
+        (LABEL_NOW, fit_models(train, features, TREE_DEPTH), features),
+    ]
+    fig, fixed, sides, notes = make_wrong_scatter(df, scored, x_feat, y_feat, line_specs)
+    st.plotly_chart(fig)
     st.caption(
         "같은 값을 가진 사람은 점이 겹쳐서 하나처럼 보일 수 있어요. "
-        "빨간 점은 놓친 환자, 보라색 점은 헛짚은 사람, 회색 점은 맞힌 사람이에요."
+        "빨간 점은 놓친 환자, 보라색 점은 헛짚은 사람, 회색 점은 맞힌 사람이에요. "
+        f"갈색 선은 원래, 초록색 선은 성능을 높인 지금의 {NAME_LOGIT}이 수면 장애(양성)일 확률을 0.5로 가르는 선이고, "
+        f"훈련용 {len(train)}명으로 학습한 모델의 선이에요. 선의 한쪽은 확률이 0.5보다 높은 쪽이에요."
     )
+    if features == ORIGINAL_FEATURES:
+        st.caption("속성이 원래와 같아서 두 선이 겹쳐 하나로 보여요. 1번에서 속성을 더하면 초록색 선이 달라져요.")
 
-    # 5) 0.5 경계선
-    show_boundaries(df, train, test, people, predictions, features, mode)
+    used = [f for f in FEATURES if f in ORIGINAL_FEATURES or f in features]
+    others = [f for f in used if f not in (x_feat, y_feat)]
+    if others:
+        values = ", ".join(f"{FEATURES[f]} {format_fixed_value(f, fixed[f])}" for f in others)
+        st.markdown(f"축이 아닌 속성은 그림에 찍힌 사람들의 중앙값에 세워 두고 계산했어요: **{values}**")
+    else:
+        st.markdown("두 모델이 쓴 속성을 모두 축으로 썼기 때문에 따로 세워 둔 값은 없어요.")
+    for note in notes:
+        st.caption(note)
+    for label in (LABEL_ORIGINAL, LABEL_NOW):
+        if sides.get(label) is not None:
+            st.warning(
+                f"{label}의 0.5 경계선은 이 그림 밖에 있어요. "
+                f"그림 안에서는 어디서나 수면 장애일 확률이 0.5보다 {sides[label]}."
+            )
 
 
 main()
