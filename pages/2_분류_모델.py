@@ -26,8 +26,6 @@ FEATURES = {
     "Sleep Duration": "하루 평균 수면 시간",
     "Physical Activity Level": "하루 신체 활동 시간",
     "Stress Level": "스트레스 수준",
-    "Gender": "성별",
-    "Age": "나이",
 }
 DEFAULT_FEATURES = ["Sleep Duration", "Physical Activity Level", "Stress Level"]
 
@@ -75,22 +73,6 @@ def load_data() -> pd.DataFrame:
     df = pd.read_csv(DATA_URL, encoding="utf-8-sig")
     df.columns = [str(c).lstrip("\ufeff").strip() for c in df.columns]
     return df
-
-
-def gender_code(value) -> float:
-    """성별이 Male/Female 글자든 0/1 숫자든 0(남성)/1(여성)로 바꿔 줘요."""
-    text = str(value).strip()
-    if text in ("0", "Male"):
-        return 0
-    if text in ("1", "Female"):
-        return 1
-    return float("nan")
-
-
-def prepare(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["Gender"] = out["Gender"].map(gender_code)
-    return out
 
 
 def split_train_test(df: pd.DataFrame):
@@ -167,8 +149,6 @@ def accuracies(models: dict, train, test, features) -> list:
 # 그림 1: 산점도 + 로지스틱 회귀 0.5 경계선 + 의사결정트리 칸
 # ------------------------------------------------------------------
 def axis_range(df: pd.DataFrame, feature: str) -> tuple:
-    if feature == "Gender":
-        return (-0.3, 1.3)
     lo, hi = float(df[feature].min()), float(df[feature].max())
     pad = (hi - lo) * 0.06 or 1.0
     return (lo - pad, hi + pad)
@@ -243,11 +223,6 @@ def tree_regions(models, features, x_feat, y_feat, fixed, x_range, y_range, n=16
 
 
 def format_fixed_value(feature: str, value: float) -> str:
-    if feature == "Gender":
-        if value == 0:
-            return "0(남성)"
-        if value == 1:
-            return "1(여성)"
     return f"{value:g}"
 
 
@@ -322,10 +297,6 @@ def make_scatter(df, test, models, features, x_feat, y_feat):
 
     fig.update_xaxes(title=x_label, range=list(x_range), zeroline=False)
     fig.update_yaxes(title=y_label, range=list(y_range), zeroline=False)
-    if x_feat == "Gender":
-        fig.update_xaxes(tickvals=[0, 1], ticktext=["남성", "여성"])
-    if y_feat == "Gender":
-        fig.update_yaxes(tickvals=[0, 1], ticktext=["남성", "여성"])
     fig.update_layout(height=560, legend=dict(orientation="h", y=-0.2), margin=dict(t=20))
     return fig, fixed, side
 
@@ -334,8 +305,6 @@ def make_scatter(df, test, models, features, x_feat, y_feat):
 # 그림 2: 의사결정트리 가지 그림 (DOT 문자열)
 # ------------------------------------------------------------------
 def question_text(feature: str, threshold: float) -> str:
-    if feature == "Gender":
-        return "성별이 남성인가요?"  # 0=남성, 1=여성이라 '0.5 이하'는 남성이에요.
     return f"{FEATURES[feature]} ≤ {threshold:.2f}?"
 
 
@@ -484,9 +453,9 @@ def main() -> None:
         st.caption(f"지금 데이터의 열: {', '.join(raw.columns)}")
         st.stop()
 
-    df = prepare(raw)
+    df = raw
     if df[needed].isna().any().any():
-        st.error("데이터에 빈 값이나 알 수 없는 값이 있어요. 성별은 Male/Female 또는 0/1이어야 해요.")
+        st.error("데이터에 빈 값이 있어요. 데이터를 확인해 주세요.")
         st.stop()
 
     # 1) 입력 속성 고르기
