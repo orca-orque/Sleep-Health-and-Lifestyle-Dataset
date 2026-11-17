@@ -25,8 +25,6 @@ FEATURES = {
     "Sleep Duration": "하루 평균 수면 시간",
     "Physical Activity Level": "하루 신체 활동 시간",
     "Stress Level": "스트레스 수준",
-    "Gender": "성별",
-    "Age": "나이",
 }
 DEFAULT_FEATURES = ["Sleep Duration", "Physical Activity Level", "Stress Level"]
 
@@ -206,7 +204,8 @@ def main() -> None:
         st.caption(f"오류 내용: {error}")
         st.stop()
 
-    needed = ["Person ID", TARGET, *FEATURES]
+    # 성별과 나이는 모델의 입력으로는 쓰지 않지만, 틀린 사람 목록에 보여 주려고 필요해요.
+    needed = ["Person ID", TARGET, "Gender", "Age", *FEATURES]
     missing = [col for col in needed if col not in raw.columns]
     if missing:
         st.error(f"데이터에 없는 열이 있어요: {', '.join(missing)}")
